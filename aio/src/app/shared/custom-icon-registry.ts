@@ -1,5 +1,5 @@
 import { InjectionToken, Inject, Injectable } from '@angular/core';
-import { of } from 'rxjs/observable/of';
+import { of } from 'rxjs';
 import { MatIconRegistry } from '@angular/material/icon';
 import { HttpClient } from '@angular/common/http';
 import { DomSanitizer } from '@angular/platform-browser';
@@ -52,7 +52,7 @@ export class CustomIconRegistry extends MatIconRegistry {
     svgIcons.forEach(icon => {
       // SECURITY: the source for the SVG icons is provided in code by trusted developers
       div.innerHTML = icon.svgSource;
-      this.preloadedSvgElements[icon.name] = div.querySelector('svg');
+      this.preloadedSvgElements[icon.name] = div.querySelector('svg')!;
     });
   }
 }

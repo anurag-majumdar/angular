@@ -6,6 +6,8 @@
  * found in the LICENSE file at https://angular.io/license
  */
 
+import {ConstantPool} from './constant_pool';
+
 import * as o from './output/output_ast';
 import {ParseError} from './parse_util';
 
@@ -90,6 +92,10 @@ export const SyncAsync = {
   }
 };
 
+export function error(msg: string): never {
+  throw new Error(`Internal Error: ${msg}`);
+}
+
 export function syntaxError(msg: string, parseErrors?: ParseError[]): Error {
   const error = Error(msg);
   (error as any)[ERROR_SYNTAX_ERROR] = true;
@@ -108,6 +114,7 @@ export function getParseErrors(error: Error): ParseError[] {
   return (error as any)[ERROR_PARSE_ERRORS] || [];
 }
 
+// Escape characters that have a special meaning in Regular Expressions
 export function escapeRegExp(s: string): string {
   return s.replace(/([.*+?^=!:${}()|[\]\/\\])/g, '\\$1');
 }
@@ -152,8 +159,11 @@ export function utf8Encode(str: string): string {
 export interface OutputContext {
   genFilePath: string;
   statements: o.Statement[];
+  constantPool: ConstantPool;
   importExpr(reference: any, typeParams?: o.Type[]|null, useSummaries?: boolean): o.Expression;
 }
+
+const MAX_LENGTH_STRINGIFY = 100;
 
 export function stringify(token: any): string {
   if (typeof token === 'string') {
@@ -176,14 +186,27 @@ export function stringify(token: any): string {
     return `${token.name}`;
   }
 
-  const res = token.toString();
+  let res;
+  try {
+    res = JSON.stringify(token);
+  } catch {
+    res = token.toString();
+  }
 
   if (res == null) {
     return '' + res;
   }
 
   const newLineIndex = res.indexOf('\n');
-  return newLineIndex === -1 ? res : res.substring(0, newLineIndex);
+  if (0 < newLineIndex) {
+    res = res.substring(0, newLineIndex);
+  }
+
+  if (MAX_LENGTH_STRINGIFY < res.length) {
+    res = res.substring(0, MAX_LENGTH_STRINGIFY) + '...';
+  }
+
+  return res;
 }
 
 /**

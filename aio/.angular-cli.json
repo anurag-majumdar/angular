@@ -13,7 +13,9 @@
         "app/search/search-worker.js",
         "favicon.ico",
         "pwa-manifest.json",
-        "google385281288605d160.html"
+        "google385281288605d160.html",
+        { "glob": "custom-elements.min.js", "input": "../node_modules/@webcomponents/custom-elements", "output": "./assets/js" },
+        { "glob": "native-shim.js", "input": "../node_modules/@webcomponents/custom-elements/src", "output": "./assets/js" }
       ],
       "index": "index.html",
       "main": "main.ts",
@@ -39,7 +41,7 @@
   ],
   "e2e": {
     "protractor": {
-      "config": "./protractor.conf.js"
+      "config": "tests/e2e/protractor.conf.js"
     }
   },
   "lint": [
@@ -50,18 +52,22 @@
       "project": "src/tsconfig.spec.json"
     },
     {
-      "project": "e2e/tsconfig.e2e.json"
+      "project": "tests/e2e/tsconfig.e2e.json"
     }
   ],
   "test": {
     "karma": {
-      "config": "./karma.conf.js"
+      "config": "src/karma.conf.js"
     }
   },
   "defaults": {
     "styleExt": "scss",
     "component": {
       "inlineStyle": true
+    },
+    "build": {
+      "namedChunks": true
     }
-  }
+  },
+  "packageManager": "yarn"
 }

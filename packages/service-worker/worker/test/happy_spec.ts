@@ -7,7 +7,7 @@
  */
 
 import {CacheDatabase} from '../src/db-cache';
-import {Driver} from '../src/driver';
+import {Driver, DriverReadyState} from '../src/driver';
 import {Manifest} from '../src/manifest';
 import {sha1} from '../src/sha1';
 import {MockRequest} from '../testing/fetch';
@@ -35,6 +35,24 @@ const distUpdate =
         .addFile('/quux.txt', 'this is quux v2')
         .addUnhashedFile('/unhashed/a.txt', 'this is unhashed v2', {'Cache-Control': 'max-age=10'})
         .build();
+
+const brokenFs = new MockFileSystemBuilder().addFile('/foo.txt', 'this is foo').build();
+
+const brokenManifest: Manifest = {
+  configVersion: 1,
+  index: '/foo.txt',
+  assetGroups: [{
+    name: 'assets',
+    installMode: 'prefetch',
+    updateMode: 'prefetch',
+    urls: [
+      '/foo.txt',
+    ],
+    patterns: [],
+  }],
+  dataGroups: [],
+  hashTable: tmpHashTableForFs(brokenFs, {'/foo.txt': true}),
+};
 
 const manifest: Manifest = {
   configVersion: 1,
@@ -132,6 +150,9 @@ const serverUpdate =
         .withRedirect('/redirected.txt', '/redirect-target.txt', 'this was a redirect')
         .build();
 
+const brokenServer =
+    new MockServerStateBuilder().withStaticFiles(brokenFs).withManifest(brokenManifest).build();
+
 const server404 = new MockServerStateBuilder().withStaticFiles(dist).build();
 
 const scope = new SwTestHarnessBuilder().withServerState(server).build();
@@ -149,7 +170,11 @@ const manifestUpdateHash = sha1(JSON.stringify(manifestUpdate));
     let driver: Driver;
 
     beforeEach(() => {
-      server.clearRequests();
+      server.reset();
+      serverUpdate.reset();
+      server404.reset();
+      brokenServer.reset();
+
       scope = new SwTestHarnessBuilder().withServerState(server).build();
       driver = new Driver(scope, scope, new CacheDatabase(scope, scope));
     });
@@ -219,39 +244,6 @@ const manifestUpdateHash = sha1(JSON.stringify(manifestUpdate));
       expect(await makeRequest(scope, '/qux.txt')).toEqual('this is qux');
       server.assertSawRequestFor('/qux.txt');
       server.assertNoOtherRequests();
-    });
-
-    async_it('updates to new content when requested', async() => {
-      expect(await makeRequest(scope, '/foo.txt')).toEqual('this is foo');
-      await driver.initialized;
-
-      const client = scope.clients.getMock('default') !;
-      expect(client.messages).toEqual([]);
-
-      scope.updateServerState(serverUpdate);
-      expect(await driver.checkForUpdate()).toEqual(true);
-      serverUpdate.assertSawRequestFor('ngsw.json');
-      serverUpdate.assertSawRequestFor('/foo.txt');
-      serverUpdate.assertSawRequestFor('/redirected.txt');
-      serverUpdate.assertNoOtherRequests();
-
-      expect(client.messages).toEqual([{
-        type: 'UPDATE_AVAILABLE',
-        current: {hash: manifestHash, appData: {version: 'original'}},
-        available: {hash: manifestUpdateHash, appData: {version: 'update'}},
-      }]);
-
-      // Default client is still on the old version of the app.
-      expect(await makeRequest(scope, '/foo.txt')).toEqual('this is foo');
-
-      // Sending a new client id should result in the updated version being returned.
-      expect(await makeRequest(scope, '/foo.txt', 'new')).toEqual('this is foo v2');
-
-      // Of course, the old version should still work.
-      expect(await makeRequest(scope, '/foo.txt')).toEqual('this is foo');
-
-      expect(await makeRequest(scope, '/bar.txt')).toEqual('this is bar');
-      serverUpdate.assertNoOtherRequests();
     });
 
     async_it('updates to new content when requested', async() => {
@@ -382,8 +374,8 @@ const manifestUpdateHash = sha1(JSON.stringify(manifestUpdate));
       serverUpdate.clearRequests();
 
       scope = new SwTestHarnessBuilder()
-                  .withServerState(serverUpdate)
                   .withCacheState(scope.caches.dehydrate())
+                  .withServerState(serverUpdate)
                   .build();
       driver = new Driver(scope, scope, new CacheDatabase(scope, scope));
 
@@ -457,6 +449,10 @@ const manifestUpdateHash = sha1(JSON.stringify(manifestUpdate));
       await driver.initialized;
       serverUpdate.assertNoOtherRequests();
 
+      let keys = await scope.caches.keys();
+      let hasOriginalCaches = keys.some(name => name.startsWith(`ngsw:${manifestHash}:`));
+      expect(hasOriginalCaches).toEqual(true);
+
       scope.clients.remove('default');
 
       scope.advance(12000);
@@ -466,10 +462,9 @@ const manifestUpdateHash = sha1(JSON.stringify(manifestUpdate));
       driver = new Driver(scope, scope, new CacheDatabase(scope, scope));
       expect(await makeRequest(scope, '/foo.txt')).toEqual('this is foo v2');
 
-      const oldManifestHash = sha1(JSON.stringify(manifest));
-      const keys = await scope.caches.keys();
-      const hasOldCaches = keys.some(name => name.startsWith(oldManifestHash + ':'));
-      expect(hasOldCaches).toEqual(false);
+      keys = await scope.caches.keys();
+      hasOriginalCaches = keys.some(name => name.startsWith(`ngsw:${manifestHash}:`));
+      expect(hasOriginalCaches).toEqual(false);
     });
 
     async_it('shows notifications for push notifications', async() => {
@@ -506,7 +501,7 @@ const manifestUpdateHash = sha1(JSON.stringify(manifestUpdate));
       expect(await driver.checkForUpdate()).toEqual(true);
       serverUpdate.assertSawRequestFor('/quux.txt');
       serverUpdate.clearRequests();
-      driver.updateClient(await scope.clients.get('default'));
+      await driver.updateClient(await scope.clients.get('default'));
       expect(await makeRequest(scope, '/quux.txt')).toEqual('this is quux v2');
       serverUpdate.assertNoOtherRequests();
     });
@@ -519,6 +514,17 @@ const manifestUpdateHash = sha1(JSON.stringify(manifestUpdate));
       expect(await driver.checkForUpdate()).toEqual(false);
       expect(scope.unregistered).toEqual(true);
       expect(await scope.caches.keys()).toEqual([]);
+    });
+
+    async_it('does not unregister or change state when offline (i.e. manifest 504s)', async() => {
+      expect(await makeRequest(scope, '/foo.txt')).toEqual('this is foo');
+      await driver.initialized;
+      server.online = false;
+
+      expect(await driver.checkForUpdate()).toEqual(false);
+      expect(driver.state).toEqual(DriverReadyState.NORMAL);
+      expect(scope.unregistered).toBeFalsy();
+      expect(await scope.caches.keys()).not.toEqual([]);
     });
 
     describe('unhashed requests', () => {
@@ -618,6 +624,7 @@ const manifestUpdateHash = sha1(JSON.stringify(manifestUpdate));
         serverUpdate.assertNoOtherRequests();
       });
     });
+
     describe('routing', () => {
       async_beforeEach(async() => {
         expect(await makeRequest(scope, '/foo.txt')).toEqual('this is foo');
@@ -659,6 +666,7 @@ const manifestUpdateHash = sha1(JSON.stringify(manifestUpdate));
           headers: {
             'Accept': 'text/plain, text/html, text/css',
           },
+          mode: 'navigate',
         })).toBeNull();
         server.assertSawRequestFor('/baz.html');
       });
@@ -673,15 +681,52 @@ const manifestUpdateHash = sha1(JSON.stringify(manifestUpdate));
         server.assertSawRequestFor('/baz');
       });
     });
+
+    describe('bugs', () => {
+      async_it('does not crash with bad index hash', async() => {
+        scope = new SwTestHarnessBuilder().withServerState(brokenServer).build();
+        (scope.registration as any).scope = 'http://site.com';
+        driver = new Driver(scope, scope, new CacheDatabase(scope, scope));
+
+        expect(await makeRequest(scope, '/foo.txt')).toEqual('this is foo');
+      });
+
+      async_it('enters degraded mode when update has a bad index', async() => {
+        expect(await makeRequest(scope, '/foo.txt')).toEqual('this is foo');
+        await driver.initialized;
+        server.clearRequests();
+
+        scope = new SwTestHarnessBuilder()
+                    .withCacheState(scope.caches.dehydrate())
+                    .withServerState(brokenServer)
+                    .build();
+        driver = new Driver(scope, scope, new CacheDatabase(scope, scope));
+        await driver.checkForUpdate();
+
+        scope.advance(12000);
+        await driver.idle.empty;
+
+        expect(driver.state).toEqual(DriverReadyState.EXISTING_CLIENTS_ONLY);
+      });
+
+      async_it('ignores invalid `only-if-cached` requests ', async() => {
+        const requestFoo = (cache: RequestCache | 'only-if-cached', mode: RequestMode) =>
+            makeRequest(scope, '/foo.txt', undefined, {cache, mode});
+
+        expect(await requestFoo('default', 'no-cors')).toBe('this is foo');
+        expect(await requestFoo('only-if-cached', 'same-origin')).toBe('this is foo');
+        expect(await requestFoo('only-if-cached', 'no-cors')).toBeNull();
+      });
+    });
   });
 })();
 
 async function makeRequest(
-    scope: SwTestHarness, url: string, clientId?: string, init?: Object): Promise<string|null> {
-  const [resPromise, done] = scope.handleFetch(new MockRequest(url, init), clientId || 'default');
+    scope: SwTestHarness, url: string, clientId = 'default', init?: Object): Promise<string|null> {
+  const [resPromise, done] = scope.handleFetch(new MockRequest(url, init), clientId);
   await done;
   const res = await resPromise;
-  scope.clients.add(clientId || 'default');
+  scope.clients.add(clientId);
   if (res !== undefined && res.ok) {
     return res.text();
   }
